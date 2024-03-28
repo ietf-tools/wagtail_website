@@ -1,52 +1,86 @@
+from datetime import timedelta
+from bs4 import BeautifulSoup
 from django.test import TestCase
+from django.utils import timezone
 from wagtail.models import Page, Site
 
+from ..home.factories import HomePageFactory
 from ..home.models import HomePage
+from .factories import IESGStatementIndexPageFactory, IESGStatementPageFactory
 from .models import IESGStatementIndexPage, IESGStatementPage
 
 
+def datefmt(value):
+    return value.strftime("%d/%m/%Y")
+
+
 class IESGStatementPageTests(TestCase):
-    def test_iesg_statement_page(self):
+    def setUp(self):
+        self.now = timezone.now()
 
         root = Page.get_first_root_node()
+        self.home: HomePage = HomePageFactory(parent=root)  # type: ignore
 
-        home = HomePage(
-            slug="homepageslug",
-            title="home page title",
-            heading="home page heading",
-            introduction="home page introduction",
+        site = Site.objects.get()
+        site.root_page = self.home
+        site.save(update_fields=["root_page"])
+
+        self.index: IESGStatementIndexPage = IESGStatementIndexPageFactory(
+            parent=self.home,
+        )  # type: ignore
+
+        self.statement: IESGStatementPage = IESGStatementPageFactory(
+            parent=self.index,
+            date_published=self.now,
+        )  # type: ignore
+
+    def test_index_page(self):
+        response = self.client.get(path=self.index.url)
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode()
+
+        self.assertIn(self.statement.title, html)
+        self.assertIn(f'href="{self.statement.url}"', html)
+
+    def test_statement_page(self):
+        response = self.client.get(path=self.statement.url)
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode()
+
+        self.assertIn(self.statement.title, html)
+        self.assertIn(self.statement.introduction, html)
+        self.assertIn(f'href="{self.index.url}"', html)
+
+    def test_filtering(self):
+        old1 = IESGStatementPageFactory(
+            parent=self.index, date_published=self.now - timedelta(days=10)
+        )
+        old2 = IESGStatementPageFactory(
+            parent=self.index, date_published=self.now - timedelta(days=5)
+        )
+        new1 = IESGStatementPageFactory(
+            parent=self.index, date_published=self.now + timedelta(days=5)
         )
 
-        root.add_child(instance=home)
+        def get_filtered(days_before=0, days_after=0):
+            date_from = self.now + timedelta(days=days_before)
+            date_to = self.now + timedelta(days=days_after)
+            params = f"date_from={datefmt(date_from)}&date_to={datefmt(date_to)}"
+            response = self.client.get(f"{self.index.url}?{params}", follow=True)
+            assert response.status_code == 200
+            html = response.content.decode()
+            soup = BeautifulSoup(html, "html.parser")
+            featured = soup.select("h1")[0].get_text().strip()
+            others = [
+                a.get_text().strip()
+                for a in soup.select('aside[aria-label="Statement listing"] h2 a')
+            ]
+            return (featured, others)
 
-        Site.objects.all().delete()
-
-        Site.objects.create(
-            hostname="localhost",
-            root_page=home,
-            is_default_site=True,
-            site_name="testingsitename",
+        assert get_filtered(-10, 10) == (
+            new1.title, [self.statement.title, old2.title, old1.title]
         )
 
-        iesg_statement_index = IESGStatementIndexPage(
-            slug="iesg_statement_index",
-            title="iesg statement index page title",
-        )
-        home.add_child(instance=iesg_statement_index)
+        assert get_filtered(0, 10) == (new1.title, [self.statement.title])
 
-        iesg_statement_page = IESGStatementPage(
-            slug="iesgstatement",
-            title="iesg statement title",
-            introduction="iesg statement introduction",
-        )
-        iesg_statement_index.add_child(instance=iesg_statement_page)
-
-        rindex = self.client.get(path=iesg_statement_index.url)
-        self.assertEqual(rindex.status_code, 200)
-
-        # r = self.client.get(path=iesg_statement_page.url)
-        # self.assertEqual(r.status_code, 200)
-
-        # self.assertIn(iesg_statement_page.title.encode(), r.content)
-        # self.assertIn(iesg_statement_page.introduction.encode(), r.content)
-        # self.assertIn(('href="%s"' % iesg_statement_index.url).encode(), r.content)
+        assert get_filtered(-10, 0) == (old2.title, [old1.title])
