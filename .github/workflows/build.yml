@@ -152,7 +152,7 @@ jobs:
     needs: [build]
     runs-on: [self-hosted, dev-server]
     env:
-      PKG_VERSION: ${{needs.build.outputs.pkg_version}}
+      PKG_VERSION: ${{ needs.build.outputs.pkg_version }}
       
     steps:
     - name: Clear workspace folder from previous runs
